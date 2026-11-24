@@ -1,0 +1,29 @@
+﻿# Builds dist\bookscan-<version>.zip (portable, no installer).
+# Requires Python 3.10 (64-bit). Creates .venv-build next to this script on first run.
+param([string]$Version = (Get-Date -Format 'yyyy.MM.dd'))
+$ErrorActionPreference = 'Stop'
+Set-Location $PSScriptRoot
+
+$venv = Join-Path $PSScriptRoot '.venv-build'
+$py = Join-Path $venv 'Scripts\python.exe'
+if (-not (Test-Path $py)) {
+    py -3.10 -m venv $venv
+    & $py -m pip install --upgrade pip
+    & $py -m pip install -r requirements.txt pyinstaller
+    & $py -m pip install --no-deps 'rapidocr_onnxruntime==1.4.4'
+}
+
+& $py -m PyInstaller --noconfirm --clean --windowed --name bookscan `
+    --add-data 'models;models' `
+    --collect-data rapidocr_onnxruntime `
+    --exclude-module tkinter --exclude-module sympy --exclude-module matplotlib `
+    app.py
+if ($LASTEXITCODE) { throw 'PyInstaller failed' }
+# Not used by the app: OpenCV's video I/O (ffmpeg) and Qt's software OpenGL fallback
+Get-ChildItem dist\bookscan\_internal -Recurse -Include 'opencv_videoio_ffmpeg*.dll', 'opengl32sw.dll' | Remove-Item
+
+Copy-Item README.md, THIRD_PARTY_NOTICES.md dist\bookscan\
+$zip = "dist\bookscan-$Version.zip"
+if (Test-Path $zip) { Remove-Item $zip }
+Compress-Archive -Path dist\bookscan -DestinationPath $zip -CompressionLevel Optimal
+Get-Item $zip | Select-Object Name, @{n = 'MB'; e = { [math]::Round($_.Length / 1MB, 1) } }

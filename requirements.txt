@@ -1,0 +1,13 @@
+pyside6-essentials==6.12.0
+numpy==1.26.4
+opencv-python-headless==4.10.0.84
+onnxruntime==1.20.1
+img2pdf==0.6.3
+pikepdf==10.13.0.post1
+pypdf==6.21.4
+pyclipper
+shapely
+pyyaml
+six
+tqdm
+# rapidocr_onnxruntime==1.4.4 is installed with --no-deps (it would pull opencv-python with its own Qt)
