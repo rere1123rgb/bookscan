@@ -30,7 +30,7 @@ import pagenum
 import process as P
 import orient
 import scanner
-import wia_scan
+import win_scan
 import worker
 from detect import VERSION as DETECT_VERSION
 from worker import imread
@@ -1921,7 +1921,7 @@ class MainWindow(QMainWindow):
             # 평판은 한 면씩, 양면 없는 피더도 끈다
             self.chk_duplex.setEnabled(source == 'Feeder' and self.scan_caps.get('duplex', True))
 
-    # 스캐너 문자열: eSCL 은 주소(http…), 드라이버(WIA)는 'wia:장치ID'
+    # 스캐너 문자열: eSCL 은 주소(http…), Windows 드라이버는 'win:장치ID'
     def _cur_dev(self):
         d = self.cb_dev.currentData() if hasattr(self, 'cb_dev') else None
         return d if d and not d.startswith('__') else ''
@@ -1952,7 +1952,7 @@ class MainWindow(QMainWindow):
             text, ok = QInputDialog.getText(
                 self, '스캐너 주소', '복합기의 네트워크 주소(IP)를 입력하세요.\n'
                                   '복합기 화면의 [네트워크 설정]이나 설정 보고서에서 볼 수 있습니다.\n예: 192.168.0.10',
-                text=self.opt.get('escl_url', '') if not self.opt.get('escl_url', '').startswith('wia:') else '')
+                text=self.opt.get('escl_url', '') if self.opt.get('escl_url', '').startswith('http') else '')
             text = text.strip()
             if ok and text:
                 if not text.startswith('http'):
@@ -1969,6 +1969,8 @@ class MainWindow(QMainWindow):
         self._ask_caps()
 
     def _startup_scanner(self):
+        if self.opt.get('escl_url', '').startswith('wia:'):   # 2026.11.27 판의 드라이버 장치 표기 → 다시 고르게
+            self.opt.update(escl_url='', device_name='')
         if self.opt.get('escl_url'):
             self._ask_caps()
         self._find_scanner(False)   # 목록은 늘 새로 찾아 둔다(고른 스캐너는 그대로)
@@ -1984,11 +1986,11 @@ class MainWindow(QMainWindow):
                 traceback.print_exc()
                 escl = []
             wia = []
-            for d in wia_scan.list_devices():
+            for d in win_scan.list_devices():
                 # Windows 가 네트워크 eSCL 스캐너를 드라이버 장치로도 보여 주므로, 네트워크로 찾았으면 뺀다
                 if escl and '\\ESCL\\' in d['id'].upper():
                     continue
-                wia.append(dict(dev='wia:' + d['id'], name=d['name'], kind='wia'))
+                wia.append(dict(dev='win:' + d['id'], name=d['name'], kind='wia'))
             self.bus.devices.emit(dict(list=escl + wia, interactive=interactive))
         threading.Thread(target=run, daemon=True).start()
 
@@ -2027,7 +2029,7 @@ class MainWindow(QMainWindow):
 
         def run():
             try:
-                caps = wia_scan.capabilities(dev[4:]) if dev.startswith('wia:') else scanner.capabilities(dev)
+                caps = win_scan.capabilities(dev[4:]) if dev.startswith('win:') else scanner.capabilities(dev)
                 if caps:
                     caps['_dev'] = dev
                     self.bus.caps.emit(caps)
@@ -2057,8 +2059,8 @@ class MainWindow(QMainWindow):
         """고른 스캐너 종류에 맞게 스캔. 받은 장수."""
         if not dev:
             raise scanner.ScanError('스캐너를 고르지 않았습니다. 오른쪽 [스캔]의 [찾기]를 눌러 스캐너를 고르세요.')
-        if dev.startswith('wia:'):
-            return wia_scan.scan(dev[4:], on_page, duplex=duplex, dpi=dpi, should_stop=lambda: self.stop_scan,
+        if dev.startswith('win:'):
+            return win_scan.scan(dev[4:], on_page, duplex=duplex, dpi=dpi, should_stop=lambda: self.stop_scan,
                                  source=source, notice=notice)
         return scanner.scan(dev, on_page, duplex=duplex, dpi=dpi, should_stop=lambda: self.stop_scan,
                             source=source, notice=notice)
@@ -2586,7 +2588,7 @@ def _selftest(w, src, out):
         rep = dict(pages=len(order), seconds=round(time.time() - t0, 1),
                    excluded=[i for i, pid in enumerate(order, 1) if P.is_excluded(w.pages[pid], w.opt)],
                    pdf_pages=len(pypdf.PdfReader(pdf).pages), target=[round(v) for v in w._target()],
-                   status=w.status.text(), wia_devices=len(wia_scan.list_devices()))
+                   status=w.status.text(), win_devices=len(win_scan.list_devices()))
         with open(os.path.join(out, 'selftest.json'), 'w', encoding='utf-8') as fh:
             json.dump(rep, fh, ensure_ascii=False, indent=1)
         QApplication.quit()

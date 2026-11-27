@@ -16,9 +16,8 @@ if (-not (Test-Path $py)) {
 & $py -m PyInstaller --noconfirm --clean --windowed --name bookscan `
     --add-data 'models;models' `
     --collect-data rapidocr_onnxruntime `
-    --hidden-import win32com.client --hidden-import pythoncom --hidden-import pywintypes --hidden-import win32timezone `
+    --collect-submodules winrt `
     --exclude-module tkinter --exclude-module sympy --exclude-module matplotlib `
-    --exclude-module win32ui --exclude-module pythonwin `
     app.py
 if ($LASTEXITCODE) { throw 'PyInstaller failed' }
 # Not used by the app: OpenCV's video I/O (ffmpeg) and Qt's software OpenGL fallback

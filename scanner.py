@@ -367,11 +367,42 @@ def scan(base, on_page, duplex=True, dpi=300, should_stop=lambda: False, source=
             raise ScanError(_LOST.format(n=n))
         on_page(data, n)
         n += 1
+    if not should_stop():
+        # 피더가 종이 걸림 등으로 멈춰도 NextDocument 는 '끝(404)'으로 답한다 → 작업·피더 상태로 확인
+        problem = _job_problem(base, job)
+        if problem:
+            got = f'\n지금까지 {n}면을 받았습니다. 받은 면은 목록에 남아 있으니, 나머지 종이만 다시 넣고 스캔하세요.' if n else ''
+            raise ScanError(problem + got)
     if n == 0 and not should_stop():   # 받은 면이 없으면 성공이 아니다
         if source == 'Feeder':
             raise ScanError('스캔된 페이지가 없습니다. 피더에 종이가 제대로 놓였는지 확인하고 다시 시도하세요.')
         raise ScanError('스캔된 페이지가 없습니다. 원고를 유리판에 올리고 다시 시도하세요.')
     return n
+
+
+def _job_problem(base, job):
+    """스캔이 끝난 뒤 피더 걸림·작업 취소가 있었는지. 사용자용 문장 또는 None."""
+    try:
+        xml = _get(base + '/ScannerStatus', 10)
+    except Exception:
+        return None
+    adf = re.search(r'<scan:AdfState>(\w+)</scan:AdfState>', xml)
+    adf = adf.group(1) if adf else ''
+    if 'Jam' in adf:
+        return '피더에 종이가 걸렸습니다. 복합기 피더 덮개를 열어 걸린 종이를 빼낸 뒤 다시 시도하세요.'
+    if 'Mispick' in adf or 'MultipickDetected' in adf:
+        return '종이가 제대로 들어가지 않았습니다(여러 장이 함께 들어갔거나 집히지 않음). 종이를 가지런히 다시 넣으세요.'
+    if 'HatchOpen' in adf or 'CoverOpen' in adf:
+        return '피더 덮개가 열려 있습니다. 덮개를 닫고 다시 시도하세요.'
+    path = re.sub(r'^https?://[^/]+', '', job).rstrip('/')
+    for info in re.findall(r'<scan:JobInfo>(.*?)</scan:JobInfo>', xml, re.S):
+        uri = re.search(r'<pwg:JobUri>([^<]+)</pwg:JobUri>', info)
+        if uri and uri.group(1).rstrip('/') == path:
+            state = re.search(r'<pwg:JobState>(\w+)</pwg:JobState>', info)
+            if state and state.group(1) in ('Canceled', 'Aborted'):
+                return ('복합기가 스캔을 중간에 멈췄습니다(종이 걸림이나 복합기 화면의 취소 등). '
+                        '복합기 화면과 피더를 확인한 뒤 다시 시도하세요.')
+    return None
 
 
 _LOST = ('스캔 중 복합기와 연결이 끊겼습니다. 지금까지 {n}면을 받았습니다.\n'
