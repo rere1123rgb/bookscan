@@ -6,11 +6,19 @@
 
 ## 다운로드
 
-[Releases](https://github.com/rere1123rgb/bookscan/releases)에서 `bookscan-*.zip`을 받아 압축을 풀고 `bookscan.exe`를 실행합니다. 설치는 필요 없습니다. 윈도우 10/11(64비트)용입니다.
+[Releases](https://github.com/rere1123rgb/bookscan/releases)에서 `bookscan-*.zip`을 받아 압축을 풀고 `bookscan.exe`를 실행합니다. 설치는 필요 없습니다. 윈도우 10/11(64비트)용입니다. 같은 폴더의 `바로가기 만들기.bat`을 실행하면 바탕화면과 시작 메뉴에 바로가기가 생깁니다.
 
 코드 서명이 없어서 처음 실행할 때 파란 "Windows의 PC 보호" 창이 뜰 수 있습니다. **추가 정보 → 실행**을 누르면 됩니다.
 
-네트워크 스캔(eSCL, AirScan, Mopria)을 지원하는 복합기가 필요하고, 드라이버는 필요 없습니다. 피더 달린 복합기 한 기종으로만 시험해서, 다른 기종에서는 일부 쪽의 모서리를 손으로 조정해야 할 수 있습니다. 이미 스캔해 둔 이미지 파일을 불러와 정리할 수도 있습니다.
+## 쓸 수 있는 스캐너
+
+프로그램을 켜면 스캐너를 자동으로 찾아 오른쪽 [스캔]의 목록에 넣어 둡니다.
+
+- **공유기(와이파이·랜선)로 연결한 복합기:** 드라이버 없이 바로 됩니다. 요즘 복합기 대부분이 지원하는 네트워크 스캔(eSCL·AirScan·Mopria)을 씁니다.
+- **USB로 연결한 복합기, 또는 제조사 드라이버만 설치한 경우:** Windows 드라이버(WIA)를 통해 스캔합니다. 양면 스캔 지원은 드라이버마다 다르고, 안 되면 한 면씩 스캔합니다.
+- **목록에 안 보이면:** 복합기를 깨운 뒤 [찾기]를 누르거나, 목록의 "네트워크 주소 직접 입력…"에 복합기 IP를 넣으세요. 다른 프로그램으로 스캔해 둔 이미지는 [파일 불러오기]로 정리할 수 있습니다.
+
+피더 달린 복합기 한 기종으로만 실물 시험을 했습니다. 다른 기종에서는 일부 쪽의 모서리를 손으로 조정([모서리 조정])해야 할 수 있습니다.
 
 ## 이런 게 편해요
 
@@ -20,7 +28,7 @@
 - **다시 스캔해도 제자리에 들어갑니다.** 문제 있는 쪽만 다시 넣으면 원래 자리를 찾아 바꿔 끼웁니다. 애매하면 바꾸지 않습니다.
 - **빈 페이지는 알아서 뺍니다.** PDF 품질(무손실까지)이나 PNG 저장도 고를 수 있습니다.
 
-같은 네트워크의 스캐너하고만 통신하고, 업데이트 확인·통계·외부 전송은 없습니다.
+스캐너하고만 통신합니다(같은 네트워크의 스캐너 찾기 포함). 업데이트 확인·통계·외부 전송은 없습니다.
 
 ---
 
@@ -32,7 +40,7 @@ Windows desktop app that turns a book scanned through a network scanner's docume
 
 ### Features
 
-- Scans directly from scanners that support eSCL (AirScan / Mopria network scanning), feeder (duplex) or flatbed. No driver needed.
+- Scans from network scanners that support eSCL (AirScan / Mopria) with no driver, found automatically (Windows-registered devices and mDNS), or from any scanner with a Windows WIA driver (USB or vendor driver). Feeder (duplex where supported) or flatbed.
 - Detects the paper area of each page, deskews and crops it, and pads smaller pages on the spine side so every page ends up the same size.
 - Auto page orientation (ONNX model), blank-page removal, edge cleanup (per page), sharpening.
 - Reads page numbers with OCR and reports missing and duplicate pages.
@@ -42,9 +50,9 @@ Windows desktop app that turns a book scanned through a network scanner's docume
 
 ### Download
 
-See [Releases](https://github.com/rere1123rgb/bookscan/releases). Windows 10/11 (64-bit). Unzip and run `bookscan.exe`.
+See [Releases](https://github.com/rere1123rgb/bookscan/releases). Windows 10/11 (64-bit). Unzip and run `bookscan.exe` (`바로가기 만들기.bat` adds desktop and Start menu shortcuts).
 
-Page detection was developed and tested with one feeder-equipped multifunction printer. Other eSCL scanners should work for scanning, but if a scanner fills the area outside the paper differently, some pages may need their corners adjusted by hand (모서리 조정).
+Page detection was developed and tested with one feeder-equipped multifunction printer. Other scanners should work for scanning, but if a scanner fills the area outside the paper differently, some pages may need their corners adjusted by hand (모서리 조정).
 
 The app talks only to the scanner on your local network. It does not check for updates or send any data.
 

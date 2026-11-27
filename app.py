@@ -15,12 +15,12 @@ import cv2
 import img2pdf
 import numpy as np
 import pypdf
-from PySide6.QtCore import QItemSelectionModel, QObject, QPointF, QSettings, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QItemSelectionModel, QObject, QPointF, QSettings, QSize, QStandardPaths, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QColor, QDrag, QIcon, QImage, QKeySequence, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog,
                                QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout,
-                               QGraphicsEllipseItem, QGraphicsItem, QGraphicsPolygonItem,
+                               QGraphicsEllipseItem, QInputDialog, QGraphicsItem, QGraphicsPolygonItem,
                                QGraphicsScene, QGraphicsView, QGroupBox, QHBoxLayout, QLabel,
                                QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu,
                                QMessageBox, QProgressBar, QPushButton, QScrollArea, QSpinBox,
@@ -30,6 +30,7 @@ import pagenum
 import process as P
 import orient
 import scanner
+import wia_scan
 import worker
 from detect import VERSION as DETECT_VERSION
 from worker import imread
@@ -40,7 +41,7 @@ WORK_DIRNAME = '_스캔작업'
 IMAGE_EXT = ('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff')
 
 DEFAULT_OPT = dict(
-    escl_url=scanner.DEFAULT_URL, source='Feeder', duplex=True, dpi=300, auto_place=True, pno_band=None,
+    escl_url=scanner.DEFAULT_URL, device_name='', source='Feeder', duplex=True, dpi=300, auto_place=True, pno_band=None,
     crop=True, edge_mm=0.5, edge_per_page=True, sharpen=1, uniform=True, uniform_mode='pad', spine='auto', margin_mm=0.0,
     auto_orient=True, rot_front=0, rot_back=0,
     skip_blank=True, blank_threshold=0.1,
@@ -102,6 +103,8 @@ class Bus(QObject):
     progress = Signal(int, int, str)
     export_done = Signal(str)
     caps = Signal(object)                # 복합기가 받는 해상도 {'Feeder': [...], 'Platen': [...]}
+    devices = Signal(object)             # 찾은 스캐너 목록
+    notice = Signal(str)                 # 스캔 중 알림(양면 → 단면 등)
     rescan_done = Signal(object)
 
 
@@ -791,6 +794,8 @@ class MainWindow(QMainWindow):
         self.bus.progress.connect(self._on_progress)
         self.bus.export_done.connect(self._on_export_done)
         self.bus.caps.connect(self._on_caps)
+        self.bus.devices.connect(self._on_devices)
+        self.bus.notice.connect(lambda m: self.status.setText(m))
         self.bus.rescan_done.connect(self._on_rescan_done)
 
         self.refresh_timer = QTimer(self, singleShot=True, interval=400, timeout=self._refresh_all)
@@ -798,7 +803,7 @@ class MainWindow(QMainWindow):
         if self.out_dir and os.path.isdir(self.out_dir):
             self._load_project()
         self._update_status()
-        self._ask_caps()
+        self._startup_scanner()
 
     # ---------- 화면 구성 ----------
     def _build_ui(self):
@@ -851,7 +856,16 @@ class MainWindow(QMainWindow):
         self.list.customContextMenuRequested.connect(self._context_menu)
 
         # 미리보기
-        self.preview = QLabel('페이지를 선택하면 여기에 결과가 보입니다')
+        self.preview = QLabel(
+            '<div style="font-size:15px; line-height:150%">'
+            '<b>사용 순서</b><br><br>'
+            '1. 오른쪽 [스캔]에서 스캐너를 고릅니다 (자동으로 찾아 둡니다)<br>'
+            '2. 책 종이를 피더에 넣고 위의 [스캔 시작]을 누릅니다<br>'
+            '&nbsp;&nbsp;&nbsp;&nbsp;이미 스캔한 이미지가 있으면 [파일 불러오기]<br>'
+            '3. 빨간 테두리가 붙은 쪽은 [문제 페이지 검토]로 확인합니다<br>'
+            '4. 오른쪽 아래 [저장하기]를 누르면 PDF 한 권이 만들어집니다<br><br>'
+            '<span style="color:gray">페이지를 고르면 여기에 결과가 보입니다</span></div>')
+        self.preview.setWordWrap(True)
         self.preview.setAlignment(Qt.AlignCenter)
         self.preview.setMinimumWidth(300)
         self.chk_raw = QCheckBox('원본과 감지 영역 보기')
@@ -934,14 +948,18 @@ class MainWindow(QMainWindow):
 
         g = QGroupBox('스캔')
         f = QFormLayout(g)
-        self.ed_url = QLineEdit()
-        self.ed_url.setPlaceholderText('비워 두면 자동으로 찾음')
+        self.devices = []           # 찾은 스캐너 [{'dev','name','kind'}]
+        self.cb_dev = QComboBox()
+        self.cb_dev.setMinimumContentsLength(10)
+        self.cb_dev.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.cb_dev.setToolTip('네트워크: 공유기로 연결된 복합기(드라이버 불필요)\n드라이버: USB 등 Windows 드라이버로 연결된 스캐너')
         btn_find = QPushButton('찾기')
-        btn_find.clicked.connect(self._find_scanner)
+        btn_find.setToolTip('네트워크와 이 PC에 연결된 스캐너를 다시 찾습니다')
+        btn_find.clicked.connect(lambda: self._find_scanner(True))
         row = QHBoxLayout()
-        row.addWidget(self.ed_url)
+        row.addWidget(self.cb_dev, 1)
         row.addWidget(btn_find)
-        f.addRow('복합기 주소', row)
+        f.addRow('스캐너', row)
         self.cb_source = QComboBox()
         self.cb_source.addItem('피더 (여러 장 자동)', 'Feeder')
         self.cb_source.addItem('평판 (유리판, 한 장씩)', 'Platen')
@@ -1041,8 +1059,8 @@ class MainWindow(QMainWindow):
             wdg.currentIndexChanged.connect(self._ui_to_opt)
         for wdg in (self.sp_margin, self.sp_edge, self.sp_blank):
             wdg.valueChanged.connect(self._ui_to_opt)
-        for wdg in (self.ed_url, self.ed_name):
-            wdg.editingFinished.connect(self._ui_to_opt)
+        self.ed_name.editingFinished.connect(self._ui_to_opt)
+        self.cb_dev.activated.connect(self._on_dev_chosen)
 
         sc = QScrollArea()
         sc.setWidget(w)
@@ -1053,7 +1071,7 @@ class MainWindow(QMainWindow):
 
     def _opt_to_ui(self):
         o = self.opt
-        self.ed_url.setText(o['escl_url'])
+        self._fill_devices()
         self.cb_source.setCurrentIndex(max(self.cb_source.findData(o['source']), 0))
         self.chk_duplex.setChecked(o['duplex'])
         self.chk_place.setChecked(o['auto_place'])
@@ -1081,7 +1099,7 @@ class MainWindow(QMainWindow):
     def _ui_to_opt(self, *_):
         old = dict(self.opt)
         self.opt.update(
-            escl_url=self.ed_url.text().strip() or scanner.DEFAULT_URL, source=self.cb_source.currentData(), duplex=self.chk_duplex.isChecked(), auto_place=self.chk_place.isChecked(),
+            escl_url=self._cur_dev(), device_name=self._cur_dev_name(), source=self.cb_source.currentData(), duplex=self.chk_duplex.isChecked(), auto_place=self.chk_place.isChecked(),
             dpi=self.cb_dpi.currentData(), crop=self.chk_crop.isChecked(), uniform=self.chk_uniform.isChecked(),
             uniform_mode=self.cb_mode.currentData(), spine=self.cb_spine.currentData(), margin_mm=self.sp_margin.value(), edge_mm=self.sp_edge.value(), sharpen=self.cb_sharpen.currentData(),
             auto_orient=self.chk_auto_ori.isChecked(), rot_front=self.cb_rot_front.currentData(), rot_back=self.cb_rot_back.currentData(),
@@ -1104,7 +1122,8 @@ class MainWindow(QMainWindow):
         return self._choose_out_dir()
 
     def _choose_out_dir(self):
-        d = QFileDialog.getExistingDirectory(self, '저장 폴더 선택', self.out_dir or os.path.expanduser('~'))
+        start = self.out_dir or QStandardPaths.writableLocation(QStandardPaths.DocumentsLocation) or os.path.expanduser('~')
+        d = QFileDialog.getExistingDirectory(self, '저장 폴더 선택 (책마다 폴더를 따로 만들면 편합니다)', start)
         if not d:
             return False
         if self.pages and os.path.normcase(d) != os.path.normcase(self.out_dir):
@@ -1899,46 +1918,143 @@ class MainWindow(QMainWindow):
         self.cb_dpi.setCurrentIndex(idx if idx >= 0 else 0)  # 없으면 가장 높은 해상도
         self.cb_dpi.blockSignals(False)
         if hasattr(self, 'chk_duplex'):
-            self.chk_duplex.setEnabled(source == 'Feeder')  # 평판은 한 면씩
+            # 평판은 한 면씩, 양면 없는 피더도 끈다
+            self.chk_duplex.setEnabled(source == 'Feeder' and self.scan_caps.get('duplex', True))
 
-    def _ask_caps(self):
-        url = self.opt['escl_url']
+    # 스캐너 문자열: eSCL 은 주소(http…), 드라이버(WIA)는 'wia:장치ID'
+    def _cur_dev(self):
+        d = self.cb_dev.currentData() if hasattr(self, 'cb_dev') else None
+        return d if d and not d.startswith('__') else ''
+
+    def _cur_dev_name(self):
+        dev = self._cur_dev()
+        return next((d['name'] for d in self.devices if d['dev'] == dev), self.opt.get('device_name') or '')
+
+    def _fill_devices(self):
+        cur = self.opt.get('escl_url') or ''
+        items = [(d['dev'], f"{d['name']}  ({'네트워크' if d['kind'] == 'escl' else '드라이버'})") for d in self.devices]
+        if cur and cur not in [d for d, _ in items]:
+            items.insert(0, (cur, self.opt.get('device_name') or cur))  # 지난번에 쓴 스캐너
+        self.cb_dev.blockSignals(True)
+        self.cb_dev.clear()
+        if not items:
+            self.cb_dev.addItem('(찾은 스캐너 없음 — [찾기])', '__none__')
+        for dev, label in items:
+            self.cb_dev.addItem(label, dev)
+        self.cb_dev.addItem('네트워크 주소 직접 입력…', '__manual__')
+        idx = self.cb_dev.findData(cur) if cur else -1
+        self.cb_dev.setCurrentIndex(idx if idx >= 0 else 0)
+        self.cb_dev.blockSignals(False)
+
+    def _on_dev_chosen(self, *_):
+        dev = self.cb_dev.currentData()
+        if dev == '__manual__':
+            text, ok = QInputDialog.getText(
+                self, '스캐너 주소', '복합기의 네트워크 주소(IP)를 입력하세요.\n'
+                                  '복합기 화면의 [네트워크 설정]이나 설정 보고서에서 볼 수 있습니다.\n예: 192.168.0.10',
+                text=self.opt.get('escl_url', '') if not self.opt.get('escl_url', '').startswith('wia:') else '')
+            text = text.strip()
+            if ok and text:
+                if not text.startswith('http'):
+                    text = 'http://' + text
+                if text.count('/') < 3:
+                    text = text.rstrip('/') + '/eSCL'
+                self.opt.update(escl_url=text, device_name=text)
+            self._fill_devices()
+        elif dev == '__none__':
+            self._find_scanner(True)
+            return
+        self._ui_to_opt()
+        self._ask_caps()
+
+    def _startup_scanner(self):
+        if self.opt.get('escl_url'):
+            self._ask_caps()
+        self._find_scanner(False)   # 목록은 늘 새로 찾아 둔다(고른 스캐너는 그대로)
+
+    def _find_scanner(self, interactive=False):
+        if interactive:
+            self.status.setText('스캐너를 찾는 중… (몇 초 걸립니다)')
 
         def run():
             try:
-                found = url or scanner.find_escl_url()  # 주소가 비어 있으면 Windows 에 등록된 스캐너를 찾는다
-                if not found:
-                    return
-                caps = scanner.capabilities(found)
-                if not url:
-                    caps['_url'] = found
-                self.bus.caps.emit(caps)
+                escl = [dict(dev=d['url'], name=d['name'], kind='escl') for d in scanner.discover()]
             except Exception:
-                pass  # 복합기가 꺼져 있으면 기본값(300/150) 그대로
+                traceback.print_exc()
+                escl = []
+            wia = []
+            for d in wia_scan.list_devices():
+                # Windows 가 네트워크 eSCL 스캐너를 드라이버 장치로도 보여 주므로, 네트워크로 찾았으면 뺀다
+                if escl and '\\ESCL\\' in d['id'].upper():
+                    continue
+                wia.append(dict(dev='wia:' + d['id'], name=d['name'], kind='wia'))
+            self.bus.devices.emit(dict(list=escl + wia, interactive=interactive))
+        threading.Thread(target=run, daemon=True).start()
+
+    def _on_devices(self, res):
+        self.devices = res['list']
+        if not self.opt.get('escl_url') and self.devices:
+            self.opt.update(escl_url=self.devices[0]['dev'], device_name=self.devices[0]['name'])
+            self._ask_caps()
+        self._fill_devices()
+        self._ui_to_opt()
+        if not res['interactive']:
+            return
+        if self.devices:
+            self.status.setText(f'스캐너 {len(self.devices)}대를 찾았습니다. 목록에서 고르세요.')
+        else:
+            self._update_status()
+            QMessageBox.information(
+                self, '스캐너 찾기',
+                '스캐너를 찾지 못했습니다.\n\n'
+                '· 공유기(와이파이)로 연결한 복합기: 켜져 있고 이 PC와 같은 공유기에 연결돼 있는지 확인하세요. '
+                '절전 중이면 복합기 화면을 한 번 눌러 깨운 뒤 [찾기]를 다시 누르세요.\n'
+                '· USB로 연결한 복합기: 제조사 홈페이지의 스캐너 드라이버를 설치해야 보입니다.\n'
+                '· 주소(IP)를 알면 목록의 "네트워크 주소 직접 입력…"을 고르세요.\n\n'
+                '다른 프로그램으로 스캔해 둔 이미지는 [파일 불러오기]로 정리할 수 있습니다.')
+
+    def _ask_caps(self):
+        dev = self.opt.get('escl_url')
+        if not dev:
+            return
+
+        def run():
+            try:
+                caps = wia_scan.capabilities(dev[4:]) if dev.startswith('wia:') else scanner.capabilities(dev)
+                if caps:
+                    caps['_dev'] = dev
+                    self.bus.caps.emit(caps)
+            except Exception:
+                pass  # 스캐너가 꺼져 있으면 기본값(300/150) 그대로
         threading.Thread(target=run, daemon=True).start()
 
     def _on_caps(self, caps):
-        if caps:
-            found = caps.pop('_url', None)
-            if found and not self.ed_url.text().strip():
-                self.ed_url.setText(found)
-            self.scan_caps.update(caps)
-            self._fill_dpi()
-            self._ui_to_opt()
+        if not caps or caps.pop('_dev', None) != self.opt.get('escl_url'):
+            return   # 그사이 다른 스캐너를 골랐다
+        self.scan_caps = {'Feeder': caps.get('Feeder') or [], 'Platen': caps.get('Platen') or [],
+                          'duplex': caps.get('duplex', True)}
+        src = self.cb_source.currentData()
+        for i in range(self.cb_source.count()):   # 없는 방식은 고를 수 없게
+            avail = bool(caps.get(self.cb_source.itemData(i)))
+            self.cb_source.model().item(i).setEnabled(avail)
+        if not caps.get(src):
+            other = 'Platen' if src == 'Feeder' else 'Feeder'
+            if caps.get(other):
+                self.cb_source.setCurrentIndex(self.cb_source.findData(other))
+        for k in ('Feeder', 'Platen'):
+            self.scan_caps[k] = self.scan_caps[k] or [300, 150]
+        self._fill_dpi()
+        self._ui_to_opt()
 
-    def _find_scanner(self):
-        self.status.setText('복합기를 찾는 중…')
-        QApplication.processEvents()
-        url = scanner.find_escl_url()
-        if url:
-            self.ed_url.setText(url)
-            self._ui_to_opt()
-            self.status.setText(f'복합기 주소: {url}')
-            self._ask_caps()
-        else:
-            QMessageBox.warning(self, '복합기 찾기', 'Windows 에 등록된 네트워크 스캐너(eSCL)를 찾지 못했습니다.\n'
-                                                   '설정 > 프린터 및 스캐너에서 복합기가 보이는지 확인하세요.')
-            self._update_status()
+    def _scan_with(self, dev, on_page, duplex, dpi, source, notice):
+        """고른 스캐너 종류에 맞게 스캔. 받은 장수."""
+        if not dev:
+            raise scanner.ScanError('스캐너를 고르지 않았습니다. 오른쪽 [스캔]의 [찾기]를 눌러 스캐너를 고르세요.')
+        if dev.startswith('wia:'):
+            return wia_scan.scan(dev[4:], on_page, duplex=duplex, dpi=dpi, should_stop=lambda: self.stop_scan,
+                                 source=source, notice=notice)
+        return scanner.scan(dev, on_page, duplex=duplex, dpi=dpi, should_stop=lambda: self.stop_scan,
+                            source=source, notice=notice)
 
     def _start_scan(self):
         if self.scanning or not self._ensure_out_dir():
@@ -1954,23 +2070,24 @@ class MainWindow(QMainWindow):
         flat = source == 'Platen'
         batch = ('P' if flat else '') + _batch_stamp()
 
+        eff = {'duplex': duplex}
+
+        def notice(msg):
+            if '한 면씩' in msg:
+                eff['duplex'] = False
+            self.bus.notice.emit(msg)
+
         def on_page(data, i):
             path = os.path.join(raw_dir, f'{batch}-{i + 1:04d}.jpg')
             with open(path, 'wb') as fh:
                 fh.write(data)
-            side = 'flat' if flat else ('front' if i % 2 == 0 else 'back') if duplex else 'front'
+            side = 'flat' if flat else ('front' if i % 2 == 0 else 'back') if eff['duplex'] else 'front'
             self.bus.scanned.emit(path, side)
             self.bus.progress.emit(i + 1, 0, f'스캔 중… {i + 1}면 받음')
 
         def run():
             try:
-                nonlocal url
-                if not url:
-                    url = scanner.find_escl_url()
-                    if not url:
-                        raise scanner.ScanError('복합기를 찾지 못했습니다. 오른쪽 [스캔]의 복합기 주소 옆 [찾기]를 누르거나\n'
-                                                '주소(예: http://192.168.0.10/eSCL)를 직접 입력하세요.')
-                n = scanner.scan(url, on_page, duplex=duplex, dpi=dpi, should_stop=lambda: self.stop_scan, source=source)
+                n = self._scan_with(url, on_page, duplex, dpi, source, notice)
                 self.bus.scan_done.emit(n, '')
             except scanner.ScanError as e:
                 self.bus.scan_done.emit(0, str(e))
@@ -2051,10 +2168,16 @@ class MainWindow(QMainWindow):
                 paths.append(path)
                 self.bus.progress.emit(i + 1, 0, f'재스캔 중… {i + 1}면 받음')
 
+            eff = {'duplex': duplex}
+
+            def notice(msg):
+                if '한 면씩' in msg:
+                    eff['duplex'] = False
+                self.bus.notice.emit(msg)
+
             try:
-                scanner.scan(url, on_page, duplex=duplex, dpi=dpi, should_stop=lambda: self.stop_scan,
-                             source=self.opt['source'])
-                self.bus.rescan_done.emit(self._match_rescan(paths, targets, old_len, duplex and feeder, feeder))
+                self._scan_with(url, on_page, duplex, dpi, self.opt['source'], notice)
+                self.bus.rescan_done.emit(self._match_rescan(paths, targets, old_len, eff['duplex'] and feeder, feeder))
             except scanner.ScanError as e:
                 self.bus.rescan_done.emit(dict(error=str(e), paths=paths))
             except Exception as e:
@@ -2456,7 +2579,7 @@ def _selftest(w, src, out):
         rep = dict(pages=len(order), seconds=round(time.time() - t0, 1),
                    excluded=[i for i, pid in enumerate(order, 1) if P.is_excluded(w.pages[pid], w.opt)],
                    pdf_pages=len(pypdf.PdfReader(pdf).pages), target=[round(v) for v in w._target()],
-                   status=w.status.text())
+                   status=w.status.text(), wia_devices=len(wia_scan.list_devices()))
         with open(os.path.join(out, 'selftest.json'), 'w', encoding='utf-8') as fh:
             json.dump(rep, fh, ensure_ascii=False, indent=1)
         QApplication.quit()

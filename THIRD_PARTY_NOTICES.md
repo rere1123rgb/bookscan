@@ -18,6 +18,7 @@ The release zip bundles the following components. Each remains under its own lic
 | Shapely (and GEOS) | BSD-3-Clause (GEOS: LGPL-2.1) | https://github.com/shapely/shapely |
 | pyclipper | MIT | https://github.com/fonttools/pyclipper |
 | PyYAML | MIT | https://github.com/yaml/pyyaml |
+| pywin32 | PSF-2.0 | https://github.com/mhammond/pywin32 |
 | lxml | BSD-3-Clause | https://lxml.de/ |
 
 The LGPL libraries (Qt, img2pdf, GEOS) are shipped as separate, unmodified files in the `_internal` folder and can be replaced with other compatible builds.
