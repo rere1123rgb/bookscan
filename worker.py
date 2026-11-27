@@ -81,7 +81,7 @@ def analyze(path, dpi, small_scale, quad=None, feeder=True, pno_band=None):
     """dict(quad, conf, top_ok, ink, small, ori). quad 를 주면(다시 연 작업) 감지는 건너뛴다."""
     raw = imread(path)
     small = cv2.resize(raw, None, fx=small_scale, fy=small_scale, interpolation=cv2.INTER_AREA)
-    res = dict(small=small)
+    res = dict(small=small, img_w=raw.shape[1])
     if quad is None:
         quad, conf, top_ok, sides = detect_page(raw, dpi, feeder)
         res.update(quad=quad, conf=conf, top_ok=top_ok, side_conf=sides, det_v=DETECT_VERSION)

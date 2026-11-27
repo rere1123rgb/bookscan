@@ -16,4 +16,5 @@ winrt-Windows.Devices.Enumeration==3.2.1
 winrt-Windows.Storage==3.2.1
 winrt-Windows.Foundation==3.2.1
 winrt-Windows.Foundation.Collections==3.2.1
+winrt-Windows.Graphics.Printing==3.2.1
 # rapidocr_onnxruntime==1.4.4 is installed with --no-deps (it would pull opencv-python with its own Qt)

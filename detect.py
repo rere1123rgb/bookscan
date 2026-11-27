@@ -20,7 +20,8 @@ WORK_DPI = 150
 # 5·6: 기울기는 좌우(원래 재단면) 기준, 위·아래 변은 수직(2° 이내)일 때만 인정하고 가운데 값 사용
 # 7: 변마다 신뢰도도 돌려준다(확인 표시 이유 안내용)
 # 8: (분석 단계) 쪽 번호 후보 읽기 추가 — 다시 분석해야 채워진다
-VERSION = 8
+# 9: 종이가 스캔 영역을 넘거나 꽉 채우는 경우(A4 등)·말이 안 되는 모양 처리
+VERSION = 9
 
 
 def _edge_in_profile(p):
@@ -117,6 +118,10 @@ def detect_page(img, dpi, feeder=True):
         return ([[0, 0], [img.shape[1] - 1, 0], [img.shape[1] - 1, img.shape[0] - 1], [0, img.shape[0] - 1]], 0.0, True,
                 dict(L=0.0, R=0.0, T=0.0, B=0.0))
     H = int(rows.max()) + 1
+    if H < 90 / 25.4 * WORK_DPI:
+        # 책 한 쪽이 9cm 보다 짧을 리 없다: 흰 종이 위 작은 점 몇 개만 위쪽에 있는 경우라
+        # 그 아래도 '빈칸'이 아니라 종이다(예전엔 높이 몇 mm 짜리 영역을 잡고 분석이 멈췄다)
+        H = h
     g = cv2.GaussianBlur(g[:H], (3, 3), 0)
     band_x, band_y, band_top = int(w * .12), int(H * .12), max(int(H * .03), 25)
     if not feeder:
@@ -154,13 +159,14 @@ def detect_page(img, dpi, feeder=True):
         # 두 방식 중 점들이 더 한 직선에 잘 모이는 쪽을 쓴다.
         # 단 둘 다 잘 맞고 서로 4mm 안쪽으로 가까우면 같은 가장자리를 본 것이니 '더 안쪽' 선을 쓴다:
         # 뒷면은 하늘색 배경판 바깥쪽 그림자 선이 먼저 잡혀 배경 띠가 1~2mm 남는 일이 있었다.
-        cands = [c for c in (_fit_line(shade[k]), _fit_line(color[k])) if c[0] is not None]
-        line, ratio = max(cands, key=lambda c: c[1]) if cands else (None, 0.0)
+        cands = [(*_fit_line(pts), len(pts)) for pts in (shade[k], color[k])]
+        cands = [c for c in cands if c[0] is not None]
+        line, ratio, npts = max(cands, key=lambda c: c[1]) if cands else (None, 0.0, 0)
         good = [c for c in cands if c[1] >= 0.6]
         if len(good) == 2:
             d = [_dist_to_center(c[0], center, k) for c in good]
             if abs(d[0] - d[1]) < 4 / 25.4 * WORK_DPI:
-                line, ratio = good[int(np.argmin(d))]
+                line, ratio, npts = good[int(np.argmin(d))]
         if line is None or ratio < 0.3:
             line, ratio = fallback[k], 0.0
         lines[k], conf[k] = line, ratio
@@ -206,11 +212,37 @@ def detect_page(img, dpi, feeder=True):
         # 윗변(종이가 들어오는 쪽)은 앞면에선 흰 배경판 위 흰 종이라 안 보인다. 일단 0행까지로 두고
         # (top_ok=False), process.effective_quad 가 아랫변에서 표준 세로 길이로 다시 정한다.
         t = min(along(_intersect(lines['L'], across)), along(_intersect(lines['R'], across)))
-    if conf['B'] >= 0.3 and tilt('B') >= 2:
+    b_tilted = conf['B'] >= 0.3 and tilt('B') >= 2
+    if b_tilted:
         conf['B'] = min(conf['B'], 0.29)  # 수직이 아닌 아랫변은 믿지 않는다(신뢰도 낮춰 확인 표시)
+    runs_off = H >= h - 2   # 아래에 드라이버가 채운 빈칸이 없다 = 종이가 스캔 범위 밖까지 이어진다(A4 종이 등)
+    if conf['B'] < 0.3 and (runs_off or not b_tilted):
+        # 종이가 스캔 끝까지 이어지면 비스듬히 잡힌 선은 글자 줄·얼룩이다 → 스캔(내용) 끝까지.
+        # (스캔 안에서 끝나는 손 재단 종이의 비스듬한 아랫변은 그 선이 더 정확해서 그대로 둔다)
+        lines['B'] = fallback['B']
+        if runs_off and min(conf['L'], conf['R']) >= 0.6:
+            conf['B'] = min(conf['L'], conf['R'])   # 아랫변 = 스캔 끝. 정상
+        elif not b_tilted and min(conf['L'], conf['R']) >= 0.8:
+            # 좌우에 배경판이 보이면(바깥 열이 종이·빈칸보다 어둡다) 그 배경이 끝나는 줄 = 종이 아래 끝.
+            # 흰 종이와 드라이버가 채운 흰 빈칸이 맞닿아 아랫변이 안 보여도 높이는 정확하다
+            mid_rows = g[int(H * .3):int(H * .7)]
+            if np.median(mid_rows[:, :3]) < 250 and np.median(mid_rows[:, -3:]) < 250:
+                conf['B'] = min(conf['L'], conf['R']) * 0.95
     b = mid('B')
     quad = [x * n + y * d for x, y in ((x_left, t), (x_right, t), (x_right, b), (x_left, b))]
     quad = [[float(px / s), float(py / s)] for px, py in quad]
+    ih, iw = img.shape[:2]
+    full = [[0.0, 0.0], [iw - 1.0, 0.0], [iw - 1.0, ih - 1.0], [0.0, ih - 1.0]]
+    qa = np.array(quad)
+    qw = (np.linalg.norm(qa[1] - qa[0]) + np.linalg.norm(qa[2] - qa[3])) / 2
+    qh = (np.linalg.norm(qa[3] - qa[0]) + np.linalg.norm(qa[2] - qa[1])) / 2
+    if min(qw, qh) < 60 / 25.4 * dpi or max(qw, qh) > 3 * min(qw, qh):
+        # 말이 안 되는 모양(아주 작거나 길쭉함) = 감지 실패. 스캔 전체를 쓰고 확인 표시
+        return full, 0.0, False, dict(L=0.0, R=0.0, T=0.0, B=0.0)
+    if feeder and max(conf['L'], conf['R']) < 0.3 and H >= h - 2:
+        # 좌우 어디에도 배경이 안 보이고 아래 빈칸도 없다 = 종이가 스캔 영역을 꽉 채운다
+        # (스캐너가 용지 크기로 잘라 보내는 경우). 스캔 전체가 종이다
+        return full, 0.5, True, dict(L=0.5, R=0.5, T=0.5, B=0.5)
     # 윗변은 그림자가 없는 게 정상(피더가 위쪽에 붙임)이라 신뢰도 계산에서 뺀다.
     # top_ok=False 면 윗변을 추정한 것이고, 기울어 들어온 종이는 윗모서리가 스캔 범위 밖으로
     # 잘렸을 수 있다 → process.effective_quad 가 다른 페이지 세로 길이로 복원한다.

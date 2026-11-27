@@ -135,6 +135,7 @@ async def _scan(dev_id, folder, duplex, dpi, should_stop, source, notice):
             cfg.max_number_of_pages = 0          # 전부
         except Exception:
             pass
+        _widest_page(cfg)
         if duplex:
             if cfg.can_scan_duplex:
                 cfg.duplex = True
@@ -163,6 +164,24 @@ async def _scan(dev_id, folder, duplex, dpi, should_stop, source, notice):
         await asyncio.sleep(0.3)
     task.result()   # 오류를 여기서 올린다
     return used_duplex
+
+
+def _widest_page(cfg):
+    """피더 용지 크기를 스캐너가 받는 것 중 가장 큰 것으로. 기본값(대개 A4)이면 드라이버가 이미지를 딱 A4로
+    잘라 보내서 종이 둘레 배경이 안 보이고, 흰 종이의 가장자리를 찾을 수 없다(실제 기기에서 확인).
+    종이보다 넓게 읽어야 네트워크(eSCL) 방식처럼 가장자리 그림자·배경이 보인다."""
+    try:
+        from winrt.windows.graphics.printing import PrintMediaSize as M, PrintOrientation as O
+    except Exception:
+        return
+    for name in ('JIS_B4', 'ISO_B4', 'NORTH_AMERICA_LEGAL', 'ISO_A4', 'NORTH_AMERICA_LETTER'):   # 넓이 큰 순
+        size = getattr(M, name, None)
+        try:
+            if size is not None and cfg.is_page_size_supported(size, O.PORTRAIT):
+                cfg.page_size, cfg.page_orientation = size, O.PORTRAIT
+                return
+        except Exception:
+            continue
 
 
 def scan(dev_id, on_page, duplex=True, dpi=300, should_stop=lambda: False, source='Feeder', notice=None):

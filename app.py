@@ -1316,6 +1316,14 @@ class MainWindow(QMainWindow):
             p['quad'] = p['auto_quad'] = res['quad']
             p['conf'], p['top_ok'], p['ink'] = res['conf'], res['top_ok'], res['ink']
             p['det_v'], p['side_conf'] = res['det_v'], res['side_conf']
+            p.update(auto_conf=res['conf'], auto_side_conf=res['side_conf'], auto_top_ok=res['top_ok'], from_mate=False)
+        if 'img_w' in res:
+            p['img_w'] = res['img_w']
+            p.setdefault('auto_conf', p.get('conf', 0.0))
+            p.setdefault('auto_side_conf', p.get('side_conf'))
+            p.setdefault('auto_top_ok', p.get('top_ok', True))
+        # 양면: 한 면만으로 가장자리를 알 수 없으면(흰 배경판 위 흰 종이 등) 같은 종이 다른 면의 영역을 쓴다
+        P.reconcile_sheets(list(self.pages.values()))
         if 'pno_cands' in res:
             p['pno_cands'], p['pno_rot'] = res['pno_cands'], res['pno_rot']
         if 'ori' in res:

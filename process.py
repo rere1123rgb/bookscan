@@ -236,7 +236,8 @@ def assign_auto_rotation(pages):
     import orient
     groups = {}
     for p in pages:
-        if p.get('ori'):
+        # 거의 빈 면(내용 1.5% 미만: 접힌 자국·비침 정도)의 방향 판단은 무작위에 가깝다: 다수결에 넣지 않는다
+        if p.get('ori') and p.get('ink', 1.0) >= 0.015:
             groups.setdefault(p.get('side'), []).append(p)
     consensus = {side: int(np.argmax(np.log(np.array([p['ori'] for p in g]) + 1e-9).sum(0)))
                  for side, g in groups.items()}
@@ -256,7 +257,13 @@ def assign_auto_rotation(pages):
     for p in pages:
         if not p.get('ori'):
             continue
+        if p.get('side') not in consensus:
+            p['auto_rot'] = None      # 이 면에 내용 있는 페이지가 없다: 앞/뒷면 설정값을 따른다
+            continue
         k_all = consensus[p.get('side')]
+        if p.get('ink', 1.0) < 0.015:
+            p['auto_rot'] = orient.fix_rotation(k_all)   # 빈 면은 자기 판단 없이 다수결
+            continue
         mates = [q for q in sheets.get(_sheet_key(p), []) if q is not p] if _sheet_key(p) else []
         if mates:
             dev = deviation(p, 0.7, 0.15)
@@ -272,6 +279,48 @@ def assign_auto_rotation(pages):
         p['auto_rot'] = orient.fix_rotation((k_all + dev) % 4)
 
 
+def reconcile_sheets(pages, mm_tol=5.0):
+    """양면 스캔: 같은 종이의 앞·뒷면은 크기가 같다. 한 면은 확실히 잡혔는데(신뢰도 0.8↑) 다른 면이
+    그보다 5mm 넘게 다르거나 불확실하면, 확실한 면의 영역을 좌우로 뒤집어 다른 면에 쓴다.
+    (양면 피더는 종이를 뒤집어 읽으므로 뒷면 이미지는 앞면의 좌우 반전. 앞·뒤 센서의 위치 차이는
+     같은 묶음에서 양쪽 다 확실한 종이들로 잰다 — 특정 기종 값을 넣지 않는다)
+    흰 배경판 위 흰 종이처럼 한 면만으로는 가장자리를 알 수 없는 경우를 위한 것. 손으로 고친 면은 건드리지 않는다."""
+    sheets, batches = {}, {}
+    for p in pages:
+        k = _sheet_key(p)
+        if k and p.get('auto_quad') and p.get('img_w') and not p.get('manual_quad'):
+            sheets.setdefault(k, {})[p['side']] = p
+    for k, pair in sheets.items():
+        f, b = pair.get('front'), pair.get('back')
+        if f and b and min(f.get('auto_conf', 0), b.get('auto_conf', 0)) >= 0.8:
+            fq, bq = np.array(f['auto_quad']), np.array(b['auto_quad'])
+            batches.setdefault(k[0], []).append(fq[:, 0].min() - (b['img_w'] - 1 - bq[:, 0].max()))
+    for k, pair in sheets.items():
+        f, b = pair.get('front'), pair.get('back')
+        for p in (f, b):     # 지난번에 짝에서 빌려 온 값은 먼저 원래대로
+            if p and p.get('from_mate'):
+                p.update(quad=p['auto_quad'], conf=p.get('auto_conf', 0), side_conf=p.get('auto_side_conf'),
+                         top_ok=p.get('auto_top_ok', True), from_mate=False)
+        if not (f and b):
+            continue
+        good, weak = (f, b) if f.get('auto_conf', 0) >= b.get('auto_conf', 0) else (b, f)
+        if good.get('auto_conf', 0) < 0.8:
+            continue
+        gs, ws = quad_size(good['auto_quad']), quad_size(weak['auto_quad'])
+        mm = 25.4 / good.get('dpi', 300)
+        differs = max(abs(gs[0] - ws[0]), abs(gs[1] - ws[1])) * mm > mm_tol
+        if not (differs or weak.get('auto_conf', 0) < 0.5):
+            continue
+        offs = batches.get(k[0])
+        off = float(np.median(offs)) if offs else 0.0
+        W = good['img_w'] - 1
+        g = np.array(good['auto_quad'], float)
+        # 좌우 반전: 왼위↔오른위, 오른아래↔왼아래. 앞면 x = W - 뒷면 x + off (반대도 같은 식)
+        m = [[W - g[i][0] + off, g[i][1]] for i in (1, 0, 3, 2)]
+        weak.update(quad=[[float(x), float(y)] for x, y in m], conf=good['auto_conf'] * 0.9,
+                    side_conf=good.get('auto_side_conf'), top_ok=good.get('auto_top_ok', True), from_mate=True)
+
+
 def target_size(pages, opt):
     """통일 크기 = 큰 쪽 기준(가로·세로 각각 90번째 백분위). 작은 페이지는 여기에 맞춰 키운다.
     최댓값을 그대로 쓰지 않는 건 감지가 크게 틀린 한두 장에 책 전체가 끌려가지 않게 하려는 것.
@@ -282,7 +331,16 @@ def target_size(pages, opt):
     use = sure if len(sure) >= 5 else ready
     if not use:
         return None
+    trusted = [p for p in use if p.get('conf', 1.0) >= 0.5]    # 가장자리를 못 찾은 페이지는 크기도 믿기 어렵다
+    if len(trusted) >= 3:
+        use = trusted
     sizes = np.array([rotated_size(quad_size(p['quad']), page_rotation(p, opt)) for p in use])
+    # 중간값에서 6% 넘게 벗어난 크기(비뚤게 들어간 종이·감지 실패)는 빼고 계산한다.
+    # 장수가 적으면 그런 한두 장이 90번째 백분위를 그대로 끌어올린다(실제 9장 묶음에서 확인)
+    med = np.median(sizes, axis=0)
+    near = sizes[(np.abs(sizes - med) / med <= 0.06).all(axis=1)]
+    if len(near) >= max(3, len(sizes) // 2):
+        sizes = near
     return tuple(float(v) for v in np.percentile(sizes, 90, axis=0))
 
 
