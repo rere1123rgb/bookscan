@@ -4,6 +4,7 @@
 - Windows 가 이미 등록해 둔 eSCL 스캐너(설정 > 프린터 및 스캐너)
 - 같은 네트워크에서 mDNS(_uscan._tcp / _uscans._tcp)로 광고하는 스캐너 (Windows 등록·드라이버 없어도 됨)
 """
+import http.client
 import re
 import socket
 import ssl
@@ -215,10 +216,11 @@ def discover(timeout=2.5):
     """찾을 수 있는 eSCL 스캐너 전부: [{'url','name','kind':'escl'}]. Windows 등록 + 네트워크 광고."""
     out, seen = [], set()
     for d in _windows_escl() + _mdns_escl(timeout):
-        host = re.sub(r'^https?://([^/:]+).*$', r'\1', d['url'])
-        if host in seen:
+        host = re.sub(r'^https?://([^/:]+).*$', r'\1', d['url']).lower()
+        name = re.sub(r'\W+', '', d['name']).lower()
+        if host in seen or (name and name in seen):
             continue
-        seen.add(host)
+        seen.update({host, name} - {''})
         out.append(dict(url=d['url'], name=d['name'], kind='escl'))
     return out
 
@@ -251,7 +253,7 @@ def capabilities(base):
         if not m:
             continue
         block = m.group(1)
-        out[name] = _resolutions(block)
+        out[name] = _resolutions(block) or [300, 150]
         mw = re.search(r'<scan:MaxWidth>(\d+)', block)
         mh = re.search(r'<scan:MaxHeight>(\d+)', block)
         if mw and mh:
@@ -278,9 +280,12 @@ def _job_error(code):
         return ScanError(BUSY_HELP)
     if code >= 500:
         return ScanError(REJECTED_HELP)
-    if code in (400, 409):
+    if code == 409:
+        return ScanError('복합기가 지금 요청을 받지 못했습니다. 다른 작업이 끝났는지 확인하고, '
+                         '계속되면 해상도를 낮추거나 양면을 끄고 다시 시도하세요.\n(HTTP 409)')
+    if code == 400:
         return ScanError('복합기가 이 스캔 설정을 받지 않았습니다. 해상도를 낮추거나 양면을 끄고 다시 시도하세요.'
-                         f'\n(HTTP {code})')
+                         '\n(HTTP 400)')
     return ScanError(f'스캔 요청이 실패했습니다(HTTP {code}).')
 
 
@@ -332,7 +337,9 @@ def scan(base, on_page, duplex=True, dpi=300, should_stop=lambda: False, source=
         if isinstance(e, urllib.error.HTTPError):
             raise _job_error(e.code)
         raise ScanError(UNREACHABLE_HELP + f'\n(주소: {base})')
-    job = resp.headers['Location']
+    job = resp.headers.get('Location')
+    if not job:
+        raise ScanError(REJECTED_HELP)
     if not job.startswith('http'):
         job = re.match(r'https?://[^/]+', base).group(0) + job
     n = 0
@@ -352,9 +359,20 @@ def scan(base, on_page, duplex=True, dpi=300, should_stop=lambda: False, source=
             if e.code == 404:  # 더 받을 페이지 없음 = 정상 종료
                 break
             raise ScanError(f'스캔 중 오류가 났습니다(HTTP {e.code}). 복합기 화면에 종이 걸림 등이 있는지 확인하세요.')
-        except (urllib.error.URLError, OSError):
-            raise ScanError(f'스캔 중 복합기와 연결이 끊겼습니다. 지금까지 {n}면을 받았습니다.\n'
-                            '복합기 상태를 확인한 뒤, 남은 종이만 다시 넣고 스캔하세요.')
-        on_page(r.read(), n)
+        except (urllib.error.URLError, OSError, http.client.HTTPException):
+            raise ScanError(_LOST.format(n=n))
+        try:
+            data = r.read()
+        except (OSError, http.client.HTTPException):
+            raise ScanError(_LOST.format(n=n))
+        on_page(data, n)
         n += 1
+    if n == 0 and not should_stop():   # 받은 면이 없으면 성공이 아니다
+        if source == 'Feeder':
+            raise ScanError('스캔된 페이지가 없습니다. 피더에 종이가 제대로 놓였는지 확인하고 다시 시도하세요.')
+        raise ScanError('스캔된 페이지가 없습니다. 원고를 유리판에 올리고 다시 시도하세요.')
     return n
+
+
+_LOST = ('스캔 중 복합기와 연결이 끊겼습니다. 지금까지 {n}면을 받았습니다.\n'
+         '복합기 상태를 확인한 뒤, 남은 종이만 다시 넣고 스캔하세요.')

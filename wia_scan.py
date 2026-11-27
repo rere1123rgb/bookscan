@@ -121,6 +121,14 @@ def _is_com_error(e):
         return False
 
 
+def _http_status(e):
+    """네트워크 스캐너 드라이버가 넘겨준 HTTP 상태(0x8019xxxx → xxx). 아니면 None."""
+    if not _is_com_error(e):
+        return None
+    hr = _hr(e)
+    return hr & 0xFFFF if hr >> 16 == 0x8019 else None
+
+
 def _explain(e):
     """오류를 사용자용 한국어 ScanError 로 바꾼다."""
     if isinstance(e, ScanError):
@@ -130,6 +138,12 @@ def _explain(e):
         msg = _MESSAGES.get(hr)
         if msg:
             return ScanError(msg)
+        http = _http_status(e)
+        if http == 503:
+            return ScanError(_MESSAGES[E_BUSY])
+        if http and http >= 500:
+            return ScanError('복합기가 스캔 요청을 거부했습니다. 복합기 화면에 멈춘 작업(\'스캔 중\')이 있으면 취소하고, '
+                             '계속되면 복합기 전원을 껐다 켜세요.')
         return ScanError(f'스캔 중 오류가 났습니다 (코드 0x{hr:08X}). 복합기 상태(종이 걸림·덮개)를 확인하고 '
                          f'다시 시도하세요. 계속되면 복합기를 껐다 켜세요.')
     return ScanError(f'스캔 중 오류가 났습니다: {e}')
@@ -257,7 +271,7 @@ def _caps(dev_id):
         if True:
             dev, item = _connect(dev_id)
             caps = _get_val(dev, P_HANDLING_CAPS, 0) or 0
-            dpis = _dpi_options(_get_prop(item, P_XRES))
+            dpis = _dpi_options(_get_prop(item, P_XRES)) or [300, 150]
             out = {'duplex': bool(caps & DUP)}
             if caps & FEED:
                 out['Feeder'] = list(dpis)
@@ -339,6 +353,8 @@ def _run(dev, item, on_page, duplex, dpi, should_stop, source, notice=None, mini
         except Exception as e:
             if _is_com_error(e) and _hr(e) == E_PAPER_EMPTY:
                 break  # 피더 끝(정상)
+            if feeder and n > 0 and _is_com_error(e) and _hr(e) in _UNSUPPORTED:
+                break  # 일부 드라이버는 다 받은 뒤 빈 피더를 '매개 변수 오류'로 알린다 → 정상 끝
             raise _Attempt(e, n)
         on_page(_to_jpeg(_image_bytes(img)), n)
         n += 1
@@ -372,6 +388,8 @@ def _scan(dev_id, on_page, duplex, dpi, should_stop, source, notice=None):
         total = 0
         for k, (dup, minimal) in enumerate(tries):
             try:
+                if minimal:   # 앞 시도에서 써 둔 설정(쪽 수·용지 크기)이 남지 않게 새로 연결
+                    dev, item = _connect(dev_id)
                 n = _run(dev, item, lambda b, i: on_page(b, total + i), dup, dpi, should_stop, source,
                          notice if k == 0 else None, minimal)
             except _Attempt as a:
@@ -381,14 +399,16 @@ def _scan(dev_id, on_page, duplex, dpi, should_stop, source, notice=None):
                     if dup and notice:
                         notice('이 스캐너(드라이버)가 양면 요청을 받지 않아 한 면씩 스캔합니다.')
                     continue  # 양면/추가 설정이 문제였을 수 있으니 더 단순하게 재시도
-                if unsupported and total == 0:
-                    # 드라이버에 따라 피더가 비었을 때도 '설정 오류'로 답한다(실제 기기에서 확인)
+                http = _http_status(a.err)
+                if total == 0 and (unsupported or (http and source == 'Feeder')):
+                    # 네트워크 스캐너용 Windows 드라이버는 피더가 비었을 때도 '설정 오류'나 HTTP 오류로 답한다
+                    # (실제 기기에서 확인: 0x80070057, 0x801901F4)
                     first = ('스캔을 시작하지 못했습니다. 피더에 종이가 제대로 놓였는지 먼저 확인하세요.\n'
                              if source == 'Feeder' else '스캔을 시작하지 못했습니다.\n')
-                    raise ScanError(first + '종이가 있는데도 같은 메시지가 나오면 해상도를 낮추거나 '
-                                    '양면을 끄고 다시 시도하세요.')
-                if total > 0 and _is_com_error(a.err) and _hr(a.err) in (E_PAPER_JAM, E_COVER_OPEN, E_MULTI_FEED):
-                    raise _explain(a.err)
+                    rest = ('종이가 있는데도 같은 메시지가 나오면 복합기 화면에 멈춘 작업(\'스캔 중\')이 있는지 보고 취소하세요.'
+                            if http and http >= 500 else
+                            '종이가 있는데도 같은 메시지가 나오면 해상도를 낮추거나 양면을 끄고 다시 시도하세요.')
+                    raise ScanError(first + rest)
                 raise _explain(a.err)
             total += n
             break

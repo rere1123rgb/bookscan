@@ -1957,8 +1957,9 @@ class MainWindow(QMainWindow):
             if ok and text:
                 if not text.startswith('http'):
                     text = 'http://' + text
+                text = text.rstrip('/')
                 if text.count('/') < 3:
-                    text = text.rstrip('/') + '/eSCL'
+                    text += '/eSCL'
                 self.opt.update(escl_url=text, device_name=text)
             self._fill_devices()
         elif dev == '__none__':
@@ -2015,6 +2016,12 @@ class MainWindow(QMainWindow):
 
     def _ask_caps(self):
         dev = self.opt.get('escl_url')
+        if getattr(self, '_caps_for', None) != dev:   # 다른 기기: 이전 기기 정보를 기본값으로 되돌린다
+            self._caps_for = dev
+            self.scan_caps = {'Feeder': [300, 150], 'Platen': [300, 150]}
+            for i in range(self.cb_source.count()):
+                self.cb_source.model().item(i).setEnabled(True)
+            self._fill_dpi()
         if not dev:
             return
 
@@ -2035,11 +2042,11 @@ class MainWindow(QMainWindow):
                           'duplex': caps.get('duplex', True)}
         src = self.cb_source.currentData()
         for i in range(self.cb_source.count()):   # 없는 방식은 고를 수 없게
-            avail = bool(caps.get(self.cb_source.itemData(i)))
+            avail = self.cb_source.itemData(i) in caps
             self.cb_source.model().item(i).setEnabled(avail)
-        if not caps.get(src):
+        if src not in caps:
             other = 'Platen' if src == 'Feeder' else 'Feeder'
-            if caps.get(other):
+            if other in caps:
                 self.cb_source.setCurrentIndex(self.cb_source.findData(other))
         for k in ('Feeder', 'Platen'):
             self.scan_caps[k] = self.scan_caps[k] or [300, 150]
