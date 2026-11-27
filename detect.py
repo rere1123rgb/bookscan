@@ -122,7 +122,8 @@ def detect_page(img, dpi, feeder=True):
         # 책 한 쪽이 9cm 보다 짧을 리 없다: 흰 종이 위 작은 점 몇 개만 위쪽에 있는 경우라
         # 그 아래도 '빈칸'이 아니라 종이다(예전엔 높이 몇 mm 짜리 영역을 잡고 분석이 멈췄다)
         H = h
-    g = cv2.GaussianBlur(g[:H], (3, 3), 0)
+    g_all = cv2.GaussianBlur(g, (3, 3), 0)             # 옆선 확인용(내용이 끝난 아래까지)
+    g = g_all[:H]
     band_x, band_y, band_top = int(w * .12), int(H * .12), max(int(H * .03), 25)
     if not feeder:
         # 평판: 책 한 쪽(약 148×200mm)을 A4 유리판 아무 데나 놓으므로 가장자리가 안쪽 깊이 있을 수 있다.
@@ -130,7 +131,8 @@ def detect_page(img, dpi, feeder=True):
         band_x, band_y = int(w * .6), int(H * .6)
         band_top = band_y
 
-    lab = cv2.cvtColor(cv2.GaussianBlur(small[:H], (3, 3), 0), cv2.COLOR_BGR2LAB).astype(np.float32)
+    lab_all = cv2.cvtColor(cv2.GaussianBlur(small, (3, 3), 0), cv2.COLOR_BGR2LAB).astype(np.float32)
+    lab = lab_all[:H]
 
     # 변마다 두 방식으로 점을 모은다: 밝기(그림자 선·어두운 종이) / 색(배경색과 다른 지점)
     shade = {k: [] for k in 'LRTB'}
@@ -228,7 +230,64 @@ def detect_page(img, dpi, feeder=True):
             mid_rows = g[int(H * .3):int(H * .7)]
             if np.median(mid_rows[:, :3]) < 250 and np.median(mid_rows[:, -3:]) < 250:
                 conf['B'] = min(conf['L'], conf['R']) * 0.95
+
+    def side_continues(y_from):
+        """찾은 아랫변(y_from) 밑으로도 좌우 옆선이 계속 보이나. 종이의 옆선은 아래 끝보다 내려갈 수 없으니,
+        계속 보이면 그 '아랫변'은 종이 끝이 아니라 인쇄된 테두리·표의 선이다(증명서 같은 문서에서 실제로 확인)."""
+        # 내용이 끝난 줄(H) 아래까지 본다: 테두리 밑 글줄 아래로는 옆 그림자 선만 남아 H 가 짧게 잡힌다
+        y0, y1 = int(y_from + 3 / 25.4 * WORK_DPI), h - 2
+        if y1 - y0 < 4 / 25.4 * WORK_DPI:
+            return None
+        hits, tot, last = 0, 0, None
+        for y in range(y0, y1 - 4, 4):
+            pg, pl = np.median(g_all[y:y + 4], 0), np.median(lab_all[y:y + 4], 0)
+            ok = True
+            for k, prof_g, prof_l, flip in (('L', pg, pl, False), ('R', pg[::-1], pl[::-1], True)):
+                x_exp = _intersect(lines[k], (1., 0., 0., y + 2.))[0]
+                x_exp = (w - 1 - x_exp) if flip else x_exp
+                found = [f(p[:band_x]) for f, p in ((_edge_in_profile, prof_g), (_color_edge_in_profile, prof_l))]
+                if not any(v is not None and abs(v - x_exp) <= 3 for v in found):
+                    ok = False
+            if ok:
+                hits, last = hits + 1, y + 4
+            tot += 1
+            if tot >= 6 and hits / tot < 0.4:
+                break                       # 옆선이 끝났다
+        # 바로 아래 5mm 안에서 대부분 이어져야 '계속된다'로 본다. 끝나는 곳 = 마지막으로 옆선이 보인 줄
+        near = int(5 / 25.4 * WORK_DPI / 4)
+        return last if tot >= 3 and hits >= 0.6 * min(tot, near) and last and last > y0 + 4 / 25.4 * WORK_DPI else None
+
+    # 아랫변이 손 재단으로 조금 기울면 낮은 쪽 모서리까지는 옆선이 이어지는 게 정상 → 가장 낮은 끝 아래부터 본다
+    b_low = max(_intersect(lines['B'], lines['L'])[1], _intersect(lines['B'], lines['R'])[1]) \
+        if conf['B'] >= 0.3 else 0
+    end = side_continues(b_low) if conf['B'] >= 0.3 and min(conf['L'], conf['R']) >= 0.6 else None
+    if end:
+        lines['B'] = (1., 0., 0., float(min(end, h - 1)))   # 옆선이 끝나는 줄 = 종이 아래 끝
+        conf['B'] = min(conf['L'], conf['R']) * 0.9
     b = mid('B')
+
+    # 인쇄된 내용은 종이 밖에 있을 수 없다. 잡은 영역 밖(2mm 넘게)에 진한 인쇄가 있으면 그 변은 종이 끝이 아니라
+    # 인쇄된 테두리·표의 선이다(흰 배경판 위 흰 종이는 진짜 끝이 안 보인다 — 증명서 스캔에서 확인).
+    # 그 변을 내용을 다 감싸는 곳(+3mm)까지 넓힌다. 넓히기만 하고 줄이지는 않는다.
+    ink = g_all < 120
+    bm = max(2, int(w * 0.01))                      # 스캔 테두리의 검은 띠 같은 건 뺀다
+    ink[:bm], ink[-bm:], ink[:, :bm], ink[:, -bm:] = False, False, False, False
+    ys, xs = np.nonzero(ink)
+    if len(xs) > 30:
+        u, v = xs * n[0] + ys * n[1], xs * d[0] + ys * d[1]
+        lo_u, hi_u = np.percentile(u, [0.05, 99.95])
+        lo_v, hi_v = np.percentile(v, [0.05, 99.95])
+        corners = np.array([[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]], float)
+        cu, cv = corners @ n, corners @ d
+        tol, margin = 2 / 25.4 * WORK_DPI, 3 / 25.4 * WORK_DPI
+        if lo_u < x_left - tol:
+            x_left, conf['L'] = max(lo_u - margin, cu.min()), min(conf['L'], 0.6)
+        if hi_u > x_right + tol:
+            x_right, conf['R'] = min(hi_u + margin, cu.max()), min(conf['R'], 0.6)
+        if lo_v < t - tol:
+            t = max(lo_v - margin, cv.min())
+        if hi_v > b + tol:
+            b, conf['B'] = min(hi_v + margin, cv.max()), min(conf['B'], 0.6) if conf['B'] >= 0.3 else 0.6
     quad = [x * n + y * d for x, y in ((x_left, t), (x_right, t), (x_right, b), (x_left, b))]
     quad = [[float(px / s), float(py / s)] for px, py in quad]
     ih, iw = img.shape[:2]

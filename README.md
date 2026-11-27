@@ -2,6 +2,8 @@
 
 직접 자른 책을 복합기로 스캔하면, 기울기·크기·방향·빈 페이지·쪽 번호까지 정리해서 PDF 한 권으로 만들어 주는 윈도우 프로그램입니다.
 
+> **시험판(베타)입니다.** 개인이 만들어 쓰던 도구를 공개한 것이고, 피더(양면) 달린 복합기 한 기종으로만 실물 시험을 했습니다. 다른 스캐너나 문서에서는 예상과 다르게 동작할 수 있습니다. 문제가 있으면 [Issues](https://github.com/rere1123rgb/bookscan/issues)에 알려 주세요(스캔 원본 이미지나 화면을 함께 올려 주시면 고치기 쉽습니다. 개인정보는 가려 주세요).
+
 [English](#english) below.
 
 ## 다운로드
@@ -20,6 +22,12 @@
 
 피더 달린 복합기 한 기종으로만 실물 시험을 했습니다. 다른 기종에서는 일부 쪽의 모서리를 손으로 조정([모서리 조정])해야 할 수 있습니다.
 
+## 알려진 한계
+
+- 흰 배경판 위의 흰 종이는 종이 끝이 화면에 보이지 않아, 인쇄된 내용을 다 감싸는 선으로 종이 영역을 정합니다. 그래서 몇몇 쪽은 내용이 한쪽으로 약간 치우칠 수 있습니다(내용이 잘리지는 않습니다). 양면 스캔이면 뒷면 정보로 바로잡습니다.
+- 테두리가 인쇄된 문서는 그 테두리를 종이 끝으로 잡을 수 있습니다. 이런 쪽은 "확인 필요"(빨간 테두리)로 표시되니 [모서리 조정]으로 고쳐 주세요.
+- 한 장만 피더에 넣으면 기종에 따라 종이가 걸릴 수 있습니다. 걸리면 앱이 알려 줍니다.
+
 ## 이런 게 편해요
 
 - **넣고 누르면 정리까지 끝납니다.** 종이 부분만 찾아 기울기를 바로잡고 잘라 내고, 위아래 방향도 알아서 맞춥니다.
@@ -37,6 +45,8 @@
 Windows desktop app that turns a book scanned through a network scanner's document feeder into one clean PDF: it scans, straightens and crops every page, makes all pages the same size, drops blank pages, checks page numbers, and saves PDF or PNG.
 
 > The UI is available in Korean only.
+
+> **Beta.** A personal tool made public. Tested on real hardware with one scanner (a multifunction printer with a duplex feeder) only; other scanners and documents may behave differently. Please report problems in [Issues](https://github.com/rere1123rgb/bookscan/issues), ideally with the raw scan image (blur any personal information).
 
 ### Features
 
