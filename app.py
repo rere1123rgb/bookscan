@@ -106,6 +106,7 @@ class Bus(QObject):
     devices = Signal(object)             # 찾은 스캐너 목록
     notice = Signal(str)                 # 스캔 중 알림(양면 → 단면 등)
     rescan_done = Signal(object)
+    analyze_failed = Signal(str, str)    # page id, 오류 설명
 
 
 class CornerEditor(QDialog):
@@ -781,6 +782,7 @@ class MainWindow(QMainWindow):
         self.opt = dict(DEFAULT_OPT)
         self.undo_stack, self.redo_stack = [], []
         self.analyzing = set()      # 분석 결과를 기다리는 페이지
+        self.analyze_info = {}      # page id → (시작 시각, quad 인자, 재시도 횟수)
         self.pending_place = []     # 새로 스캔해서 쪽 번호 자리를 찾아 줄 페이지(스캔 순서)
         self.clip = None  # {'mode': 'cut'|'copy', 'pids': [...]}
         self.out_dir = self.settings.value('out_dir', '') or ''
@@ -797,6 +799,10 @@ class MainWindow(QMainWindow):
         self.bus.devices.connect(self._on_devices)
         self.bus.notice.connect(lambda m: self.status.setText(m))
         self.bus.rescan_done.connect(self._on_rescan_done)
+        self.bus.analyze_failed.connect(self._on_analyze_failed)
+        # 결과가 너무 오래 안 오는 분석(보조 프로세스가 멈춤 등)을 찾아 다시 시도한다
+        self.watchdog = QTimer(self, interval=15000, timeout=self._check_stuck_analysis)
+        self.watchdog.start()
 
         self.refresh_timer = QTimer(self, singleShot=True, interval=400, timeout=self._refresh_all)
         self.save_timer = QTimer(self, singleShot=True, interval=1000, timeout=self._save_project)
@@ -1231,25 +1237,81 @@ class MainWindow(QMainWindow):
         self._renumber()
         self._schedule_save()
 
-    def _analyze(self, pid, quad=None):
-        """분석은 프로세스 풀에서, 결과는 화면 스레드로. quad 를 주면 감지는 건너뛴다."""
+    def _analyze(self, pid, quad=None, retry=0):
+        """분석은 프로세스 풀에서, 결과는 화면 스레드로. quad 를 주면 감지는 건너뛴다.
+        실패하면(파일 손상, 보조 프로세스가 죽음 등) 두 번까지 다시 하고, 그래도 안 되면 '분석 실패'로 표시한다.
+        (예전엔 오류가 로그에만 남아 그 페이지가 영원히 '분석 중'으로 남고 저장도 막혔다)"""
         p = self.pages[pid]
         self.analyzing.add(pid)
-        fut = self.procs.submit(worker.analyze, self._raw_path(p), p['dpi'], SMALL, quad, p.get('side') != 'flat',
-                                self.opt.get('pno_band'))
+        self.analyze_info[pid] = (time.time(), quad, retry)
+        args = (worker.analyze, self._raw_path(p), p['dpi'], SMALL, quad, p.get('side') != 'flat',
+                self.opt.get('pno_band'))
+        try:
+            fut = self.procs.submit(*args)
+        except Exception:                 # 풀이 망가졌다(보조 프로세스가 죽음) → 새로 만들고 한 번 더
+            traceback.print_exc()
+            self._restart_procs()
+            try:
+                fut = self.procs.submit(*args)
+            except Exception as e:
+                msg = f'{type(e).__name__}: {e}'
+                QTimer.singleShot(0, lambda: self._on_analyze_failed(pid, msg))
+                return
 
         def done(f):
             try:
                 self.bus.analyzed.emit(pid, f.result())
-            except Exception:
+            except BaseException as e:
                 traceback.print_exc()
+                self.bus.analyze_failed.emit(pid, f'{type(e).__name__}: {e}')
         fut.add_done_callback(done)
 
-    def _on_analyzed(self, pid, res):
+    def _restart_procs(self):
+        """분석 프로세스 풀을 새로 만든다(짧은 시간에 여러 번 부르면 한 번만)."""
+        if time.time() - getattr(self, '_procs_restarted', 0) < 5:
+            return
+        self._procs_restarted = time.time()
+        old = self.procs
+        cpu = os.cpu_count() or 4
+        self.procs = ProcessPoolExecutor(max_workers=max(1, min(cpu - 1, 8)))
+        try:
+            old.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            pass
+
+    def _on_analyze_failed(self, pid, err):
+        if pid not in self.analyzing:
+            return                      # 이미 처리됨(늦게 온 결과 등)
         self.analyzing.discard(pid)
         p = self.pages.get(pid)
         if not p:
             return
+        _, quad, retry = self.analyze_info.get(pid, (0, None, 0))
+        if 'BrokenProcessPool' in err or 'terminated abruptly' in err or '응답 없음' in err:
+            self._restart_procs()
+        if retry < 2:
+            QTimer.singleShot(1000 * (retry + 1),
+                              lambda: pid in self.pages and not self.pages[pid].get('quad') and pid not in self.analyzing
+                              and self._analyze(pid, quad, retry + 1))
+            return
+        print(f'분석 실패: {p.get("raw")} — {err}', flush=True)
+        p['analysis_error'] = err[:300]
+        self._update_status()
+
+    def _check_stuck_analysis(self):
+        now = time.time()
+        for pid in list(self.analyzing):
+            started = self.analyze_info.get(pid, (now,))[0]
+            if now - started > 180:      # 한 장 분석은 보통 몇 초. 3분이면 멈춘 것
+                self._on_analyze_failed(pid, '응답 없음(분석이 3분 넘게 끝나지 않음)')
+
+    def _on_analyzed(self, pid, res):
+        self.analyzing.discard(pid)
+        self.analyze_info.pop(pid, None)
+        p = self.pages.get(pid)
+        if not p:
+            return
+        p.pop('analysis_error', None)
         if 'conf' in res:
             p['quad'] = p['auto_quad'] = res['quad']
             p['conf'], p['top_ok'], p['ink'] = res['conf'], res['top_ok'], res['ink']
@@ -2362,11 +2424,28 @@ class MainWindow(QMainWindow):
         if not (self.opt['save_pdf'] or self.opt['save_png']):
             QMessageBox.information(self, '저장하기', 'PDF 나 PNG 중 하나 이상을 골라 주세요.')
             return
-        pending = [pid for pid in self._order() if not self.pages[pid].get('quad')]
+        failed = [pid for pid in self._order() if not self.pages[pid].get('quad') and self.pages[pid].get('analysis_error')]
+        pending = [pid for pid in self._order() if not self.pages[pid].get('quad') and pid not in failed]
         if pending:
             QMessageBox.information(self, '저장하기', f'아직 분석 중인 페이지가 {len(pending)}장 있습니다. 잠시 후 다시 눌러 주세요.')
             return
-        order = [pid for pid in self._order() if not P.is_excluded(self.pages[pid], self.opt)]
+        if failed:
+            box = QMessageBox(QMessageBox.Warning, '저장하기',
+                              f'분석하지 못한 페이지가 {len(failed)}장 있습니다(스캔 파일이 손상됐을 수 있습니다).\n'
+                              '이 페이지들을 빼고 저장할까요?', parent=self)
+            b_skip = box.addButton('빼고 저장', QMessageBox.AcceptRole)
+            b_retry = box.addButton('다시 분석', QMessageBox.ActionRole)
+            box.addButton('취소', QMessageBox.RejectRole)
+            box.exec()
+            if box.clickedButton() is b_retry:
+                for pid in failed:
+                    self.pages[pid].pop('analysis_error', None)
+                    self._analyze(pid)
+                self._update_status()
+                return
+            if box.clickedButton() is not b_skip:
+                return
+        order = [pid for pid in self._order() if pid not in failed and not P.is_excluded(self.pages[pid], self.opt)]
         if not order:
             QMessageBox.information(self, '저장하기', '저장할 페이지가 없습니다.')
             return
@@ -2519,9 +2598,12 @@ class MainWindow(QMainWindow):
         ps = list(self.pages.values())
         excluded = sum(P.is_excluded(p, self.opt) for p in ps)
         warn = sum(1 for p in ps if not P.is_excluded(p, self.opt) and P.warn_reasons(p, self.opt, target))
-        analyzing = sum(1 for p in ps if not p.get('quad'))
+        failed = sum(1 for p in ps if not p.get('quad') and p.get('analysis_error'))
+        analyzing = sum(1 for p in ps if not p.get('quad') and not p.get('analysis_error'))
         parts = [prefix] if prefix else []
         parts.append(f'전체 {len(ps)}장 · 저장될 쪽 {len(ps) - excluded} · 제외 {excluded}')
+        if failed:
+            parts.append(f'⚠ 분석 실패 {failed}장 ([저장하기]에서 다시 분석하거나 빼고 저장)')
         if warn:
             parts.append(f'⚠ 확인 필요 {warn}장')
         if analyzing:
